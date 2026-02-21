@@ -35,7 +35,16 @@ func StripeWebhook(cfg config.Config, store *billingstore.OverviewStore) http.Ha
 				http.Error(w, "Missing Stripe-Signature header", http.StatusBadRequest)
 				return
 			}
-			event, err = webhook.ConstructEvent(payload, signature, webhookSecret)
+			event, err = webhook.ConstructEventWithOptions(
+				payload,
+				signature,
+				webhookSecret,
+				webhook.ConstructEventOptions{
+					// Stripe dashboard no modo "clover" pode ficar à frente da versão
+					// esperada pela SDK. Mantemos assinatura validada e ignoramos só mismatch de versão.
+					IgnoreAPIVersionMismatch: true,
+				},
+			)
 			if err != nil {
 				http.Error(w, "Webhook Error: "+err.Error(), http.StatusBadRequest)
 				return
