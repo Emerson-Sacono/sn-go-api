@@ -81,6 +81,10 @@ func (s *OverviewStore) UpsertSubscriptionFromSubscription(raw json.RawMessage) 
 
 	price := extractFirstPrice(obj)
 	recurring := getMapAny(price["recurring"])
+	cancellationDetails := getMapAny(obj["cancellation_details"])
+	cancellationReason := getStringAny(cancellationDetails["reason"])
+	cancellationFeedback := getStringAny(cancellationDetails["feedback"])
+	cancellationComment := getStringAny(cancellationDetails["comment"])
 	now := time.Now().UTC()
 
 	setDoc := bson.M{
@@ -97,6 +101,15 @@ func (s *OverviewStore) UpsertSubscriptionFromSubscription(raw json.RawMessage) 
 	}
 	if status := getStringAny(obj["status"]); status != "" {
 		setDoc["status"] = status
+	}
+	if cancellationReason != "" {
+		setDoc["cancellationReason"] = cancellationReason
+	}
+	if cancellationFeedback != "" {
+		setDoc["cancellationFeedback"] = cancellationFeedback
+	}
+	if cancellationComment != "" {
+		setDoc["cancellationComment"] = cancellationComment
 	}
 	if ts := toTimePtr(getInt64Any(obj["current_period_end"])); ts != nil {
 		setDoc["currentPeriodEnd"] = ts
@@ -123,16 +136,28 @@ func (s *OverviewStore) UpsertSubscriptionFromSubscription(raw json.RawMessage) 
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
 
+	unsetDoc := bson.M{}
+	if !strings.EqualFold(getStringAny(obj["status"]), "canceled") {
+		unsetDoc["cancellationReason"] = ""
+		unsetDoc["cancellationFeedback"] = ""
+		unsetDoc["cancellationComment"] = ""
+	}
+
+	updateDoc := bson.M{
+		"$set": setDoc,
+		"$setOnInsert": bson.M{
+			"subscriptionId": subscriptionID,
+			"createdAt":      now,
+		},
+	}
+	if len(unsetDoc) > 0 {
+		updateDoc["$unset"] = unsetDoc
+	}
+
 	_, err = s.subscriptions.UpdateOne(
 		ctx,
 		bson.M{"subscriptionId": subscriptionID},
-		bson.M{
-			"$set": setDoc,
-			"$setOnInsert": bson.M{
-				"subscriptionId": subscriptionID,
-				"createdAt":      now,
-			},
-		},
+		updateDoc,
 		options.Update().SetUpsert(true),
 	)
 	return err
@@ -383,6 +408,10 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	productDescription := strings.TrimSpace(metadata["productDescription"])
 	productImageURL := strings.TrimSpace(metadata["productImageUrl"])
 	trialDays := parsePositiveInt64String(metadata["trialDays"])
+	cancellationDetails := getMapAny(obj["cancellation_details"])
+	cancellationReason := getStringAny(cancellationDetails["reason"])
+	cancellationFeedback := getStringAny(cancellationDetails["feedback"])
+	cancellationComment := getStringAny(cancellationDetails["comment"])
 	stripeCustomerID := getExpandableID(obj["customer"])
 	canceledAt := toTimePtr(getInt64Any(obj["canceled_at"]))
 	currentPeriodEnd := toTimePtr(getInt64Any(obj["current_period_end"]))
@@ -428,6 +457,15 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	if canceledAt != nil {
 		sharedSet["canceledAt"] = canceledAt
 	}
+	if cancellationReason != "" {
+		sharedSet["cancellationReason"] = cancellationReason
+	}
+	if cancellationFeedback != "" {
+		sharedSet["cancellationFeedback"] = cancellationFeedback
+	}
+	if cancellationComment != "" {
+		sharedSet["cancellationComment"] = cancellationComment
+	}
 	if len(metadata) > 0 {
 		sharedSet["metadata"] = metadata
 	}
@@ -435,8 +473,19 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
 
+	unsetDoc := bson.M{}
+	if status != "canceled" {
+		unsetDoc["cancellationReason"] = ""
+		unsetDoc["cancellationFeedback"] = ""
+		unsetDoc["cancellationComment"] = ""
+	}
+
 	if objectID, ok := asObjectID(billingRecordID); ok {
-		result, err := s.billingRecords.UpdateOne(ctx, bson.M{"_id": objectID}, bson.M{"$set": sharedSet})
+		updateDoc := bson.M{"$set": sharedSet}
+		if len(unsetDoc) > 0 {
+			updateDoc["$unset"] = unsetDoc
+		}
+		result, err := s.billingRecords.UpdateOne(ctx, bson.M{"_id": objectID}, updateDoc)
 		if err != nil {
 			return err
 		}
@@ -455,14 +504,28 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	if trialDays > 0 {
 		setOnInsert["trialDays"] = trialDays
 	}
+	if cancellationReason != "" {
+		setOnInsert["cancellationReason"] = cancellationReason
+	}
+	if cancellationFeedback != "" {
+		setOnInsert["cancellationFeedback"] = cancellationFeedback
+	}
+	if cancellationComment != "" {
+		setOnInsert["cancellationComment"] = cancellationComment
+	}
+
+	updateDoc := bson.M{
+		"$set":         sharedSet,
+		"$setOnInsert": setOnInsert,
+	}
+	if len(unsetDoc) > 0 {
+		updateDoc["$unset"] = unsetDoc
+	}
 
 	_, err = s.billingRecords.UpdateOne(
 		ctx,
 		bson.M{"stripeSubscriptionId": subscriptionID},
-		bson.M{
-			"$set":         sharedSet,
-			"$setOnInsert": setOnInsert,
-		},
+		updateDoc,
 		options.Update().SetUpsert(true),
 	)
 	return err

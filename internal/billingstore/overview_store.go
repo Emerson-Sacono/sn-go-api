@@ -49,6 +49,9 @@ type BillingRecordPayload struct {
 	ProductName           any    `json:"productName"`
 	ProductDescription    any    `json:"productDescription"`
 	ProductImageURL       any    `json:"productImageUrl"`
+	CancellationReason    any    `json:"cancellationReason"`
+	CancellationFeedback  any    `json:"cancellationFeedback"`
+	CancellationComment   any    `json:"cancellationComment"`
 	CustomerEmail         any    `json:"customerEmail"`
 	CustomerName          any    `json:"customerName"`
 	AmountMinor           int64  `json:"amountMinor"`
@@ -74,22 +77,25 @@ type BillingRecordPayload struct {
 }
 
 type SubscriptionPayload struct {
-	ID                string `json:"id"`
-	StripeCustomerID  string `json:"stripeCustomerId"`
-	SubscriptionID    string `json:"subscriptionId"`
-	Email             any    `json:"email"`
-	Name              any    `json:"name"`
-	Phone             any    `json:"phone"`
-	Plan              any    `json:"plan"`
-	PriceID           any    `json:"priceId"`
-	Status            any    `json:"status"`
-	CurrentPeriodEnd  any    `json:"currentPeriodEnd"`
-	TrialEnd          any    `json:"trialEnd"`
-	CancelAt          any    `json:"cancelAt"`
-	CancelAtPeriodEnd bool   `json:"cancelAtPeriodEnd"`
-	LastInvoiceStatus any    `json:"lastInvoiceStatus"`
-	LastInvoiceAt     any    `json:"lastInvoiceAt"`
-	UpdatedAt         any    `json:"updatedAt"`
+	ID                   string `json:"id"`
+	StripeCustomerID     string `json:"stripeCustomerId"`
+	SubscriptionID       string `json:"subscriptionId"`
+	Email                any    `json:"email"`
+	Name                 any    `json:"name"`
+	Phone                any    `json:"phone"`
+	Plan                 any    `json:"plan"`
+	CancellationReason   any    `json:"cancellationReason"`
+	CancellationFeedback any    `json:"cancellationFeedback"`
+	CancellationComment  any    `json:"cancellationComment"`
+	PriceID              any    `json:"priceId"`
+	Status               any    `json:"status"`
+	CurrentPeriodEnd     any    `json:"currentPeriodEnd"`
+	TrialEnd             any    `json:"trialEnd"`
+	CancelAt             any    `json:"cancelAt"`
+	CancelAtPeriodEnd    bool   `json:"cancelAtPeriodEnd"`
+	LastInvoiceStatus    any    `json:"lastInvoiceStatus"`
+	LastInvoiceAt        any    `json:"lastInvoiceAt"`
+	UpdatedAt            any    `json:"updatedAt"`
 }
 
 type billingRecordDoc struct {
@@ -100,6 +106,9 @@ type billingRecordDoc struct {
 	ProductName           any                `bson:"productName,omitempty"`
 	ProductDescription    any                `bson:"productDescription,omitempty"`
 	ProductImageURL       any                `bson:"productImageUrl,omitempty"`
+	CancellationReason    any                `bson:"cancellationReason,omitempty"`
+	CancellationFeedback  any                `bson:"cancellationFeedback,omitempty"`
+	CancellationComment   any                `bson:"cancellationComment,omitempty"`
 	CustomerEmail         any                `bson:"customerEmail,omitempty"`
 	CustomerName          any                `bson:"customerName,omitempty"`
 	AmountMinor           int64              `bson:"amountMinor"`
@@ -125,22 +134,25 @@ type billingRecordDoc struct {
 }
 
 type subscriptionDoc struct {
-	ID                primitive.ObjectID `bson:"_id"`
-	StripeCustomerID  string             `bson:"stripeCustomerId"`
-	SubscriptionID    string             `bson:"subscriptionId"`
-	Email             any                `bson:"email,omitempty"`
-	Name              any                `bson:"name,omitempty"`
-	Phone             any                `bson:"phone,omitempty"`
-	Plan              any                `bson:"plan,omitempty"`
-	PriceID           any                `bson:"priceId,omitempty"`
-	Status            any                `bson:"status,omitempty"`
-	CurrentPeriodEnd  *time.Time         `bson:"currentPeriodEnd,omitempty"`
-	TrialEnd          *time.Time         `bson:"trialEnd,omitempty"`
-	CancelAt          *time.Time         `bson:"cancelAt,omitempty"`
-	CancelAtPeriodEnd bool               `bson:"cancelAtPeriodEnd,omitempty"`
-	LastInvoiceStatus any                `bson:"lastInvoiceStatus,omitempty"`
-	LastInvoiceAt     *time.Time         `bson:"lastInvoiceAt,omitempty"`
-	UpdatedAt         *time.Time         `bson:"updatedAt,omitempty"`
+	ID                   primitive.ObjectID `bson:"_id"`
+	StripeCustomerID     string             `bson:"stripeCustomerId"`
+	SubscriptionID       string             `bson:"subscriptionId"`
+	Email                any                `bson:"email,omitempty"`
+	Name                 any                `bson:"name,omitempty"`
+	Phone                any                `bson:"phone,omitempty"`
+	Plan                 any                `bson:"plan,omitempty"`
+	CancellationReason   any                `bson:"cancellationReason,omitempty"`
+	CancellationFeedback any                `bson:"cancellationFeedback,omitempty"`
+	CancellationComment  any                `bson:"cancellationComment,omitempty"`
+	PriceID              any                `bson:"priceId,omitempty"`
+	Status               any                `bson:"status,omitempty"`
+	CurrentPeriodEnd     *time.Time         `bson:"currentPeriodEnd,omitempty"`
+	TrialEnd             *time.Time         `bson:"trialEnd,omitempty"`
+	CancelAt             *time.Time         `bson:"cancelAt,omitempty"`
+	CancelAtPeriodEnd    bool               `bson:"cancelAtPeriodEnd,omitempty"`
+	LastInvoiceStatus    any                `bson:"lastInvoiceStatus,omitempty"`
+	LastInvoiceAt        *time.Time         `bson:"lastInvoiceAt,omitempty"`
+	UpdatedAt            *time.Time         `bson:"updatedAt,omitempty"`
 }
 
 type CreateBillingRecordInput struct {
@@ -302,6 +314,9 @@ func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
 			ProductName:           item.ProductName,
 			ProductDescription:    item.ProductDescription,
 			ProductImageURL:       item.ProductImageURL,
+			CancellationReason:    item.CancellationReason,
+			CancellationFeedback:  item.CancellationFeedback,
+			CancellationComment:   item.CancellationComment,
 			CustomerEmail:         item.CustomerEmail,
 			CustomerName:          item.CustomerName,
 			AmountMinor:           item.AmountMinor,
@@ -329,22 +344,25 @@ func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
 
 	for _, item := range subscriptions {
 		out.Subscriptions = append(out.Subscriptions, SubscriptionPayload{
-			ID:                item.ID.Hex(),
-			StripeCustomerID:  item.StripeCustomerID,
-			SubscriptionID:    item.SubscriptionID,
-			Email:             item.Email,
-			Name:              item.Name,
-			Phone:             item.Phone,
-			Plan:              item.Plan,
-			PriceID:           item.PriceID,
-			Status:            item.Status,
-			CurrentPeriodEnd:  isoOrNil(item.CurrentPeriodEnd),
-			TrialEnd:          isoOrNil(item.TrialEnd),
-			CancelAt:          isoOrNil(item.CancelAt),
-			CancelAtPeriodEnd: item.CancelAtPeriodEnd,
-			LastInvoiceStatus: item.LastInvoiceStatus,
-			LastInvoiceAt:     isoOrNil(item.LastInvoiceAt),
-			UpdatedAt:         isoOrNil(item.UpdatedAt),
+			ID:                   item.ID.Hex(),
+			StripeCustomerID:     item.StripeCustomerID,
+			SubscriptionID:       item.SubscriptionID,
+			Email:                item.Email,
+			Name:                 item.Name,
+			Phone:                item.Phone,
+			Plan:                 item.Plan,
+			CancellationReason:   item.CancellationReason,
+			CancellationFeedback: item.CancellationFeedback,
+			CancellationComment:  item.CancellationComment,
+			PriceID:              item.PriceID,
+			Status:               item.Status,
+			CurrentPeriodEnd:     isoOrNil(item.CurrentPeriodEnd),
+			TrialEnd:             isoOrNil(item.TrialEnd),
+			CancelAt:             isoOrNil(item.CancelAt),
+			CancelAtPeriodEnd:    item.CancelAtPeriodEnd,
+			LastInvoiceStatus:    item.LastInvoiceStatus,
+			LastInvoiceAt:        isoOrNil(item.LastInvoiceAt),
+			UpdatedAt:            isoOrNil(item.UpdatedAt),
 		})
 	}
 
