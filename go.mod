@@ -1,6 +1,6 @@
 module sn-go-api
 
-go 1.25.7
+go 1.25
 
 require (
 	github.com/stripe/stripe-go/v82 v82.5.1
