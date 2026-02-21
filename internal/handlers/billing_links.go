@@ -43,6 +43,12 @@ var zeroDecimalCurrencies = map[string]struct{}{
 	"pyg": {}, "rwf": {}, "ugx": {}, "vnd": {}, "vuv": {}, "xaf": {}, "xof": {}, "xpf": {},
 }
 
+var allowedBillingStages = map[string]string{
+	"entrada_50":     "one_time",
+	"final_50":       "one_time",
+	"suporte_mensal": "recurring",
+}
+
 func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStore *authstore.MongoStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := requireAccessClaims(r, cfg, authStore); err != nil {
@@ -65,18 +71,44 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Tipo inválido. Use one_time ou recurring."})
 			return
 		}
+		stage := strings.TrimSpace(body.Stage)
+		if stage == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Etapa é obrigatória."})
+			return
+		}
+		expectedType, stageIsAllowed := allowedBillingStages[stage]
+		if !stageIsAllowed {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Etapa inválida."})
+			return
+		}
+		if expectedType != typ {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Tipo incompatível com a etapa selecionada."})
+			return
+		}
 
 		description := strings.TrimSpace(body.Description)
-		if description == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Descrição é obrigatória."})
+		if !isValidUserText(description, 3, 120) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Descrição inválida. Use de 3 a 120 caracteres sem símbolos proibidos."})
 			return
 		}
 		productName := strings.TrimSpace(body.ProductName)
 		if productName == "" {
 			productName = description
 		}
+		if !isValidUserText(productName, 3, 100) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Nome do produto inválido. Use de 3 a 100 caracteres sem símbolos proibidos."})
+			return
+		}
 		productDescription := strings.TrimSpace(body.ProductDescription)
+		if !isValidUserText(productDescription, 10, 320) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Descrição do produto inválida. Use de 10 a 320 caracteres sem símbolos proibidos."})
+			return
+		}
 		productImageURL := strings.TrimSpace(body.ProductImageURL)
+		if productImageURL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Imagem do produto é obrigatória."})
+			return
+		}
 		if productImageURL != "" {
 			normalizedImageURL, err := normalizeProductImageURL(productImageURL)
 			if err != nil {
@@ -95,8 +127,17 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 		}
 
 		customerEmail := strings.ToLower(strings.TrimSpace(body.CustomerEmail))
-		if customerEmail != "" && !isValidSimpleEmail(customerEmail) {
+		if customerEmail == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "E-mail do cliente é obrigatório."})
+			return
+		}
+		if !isValidSimpleEmail(customerEmail) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "E-mail do cliente inválido."})
+			return
+		}
+		customerName := strings.TrimSpace(body.CustomerName)
+		if !isValidCustomerName(customerName) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Nome do cliente inválido. Use de 2 a 90 caracteres sem símbolos proibidos."})
 			return
 		}
 
@@ -106,14 +147,23 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 			return
 		}
 
-		interval := strings.TrimSpace(body.Interval)
+		interval := strings.ToLower(strings.TrimSpace(body.Interval))
 		intervalCount := body.IntervalCount
-		if intervalCount <= 0 {
-			intervalCount = 1
+		allowedIntervals := map[string]struct{}{
+			"day": {}, "week": {}, "month": {}, "year": {},
 		}
-		if typ == "recurring" && interval == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Intervalo é obrigatório para cobrança recorrente."})
-			return
+		if typ == "recurring" {
+			if _, ok := allowedIntervals[interval]; !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Intervalo recorrente inválido."})
+				return
+			}
+			if intervalCount < 1 || intervalCount > 12 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Intervalo recorrente inválido. Use um valor entre 1 e 12."})
+				return
+			}
+		} else {
+			interval = ""
+			intervalCount = 1
 		}
 		trialDays := body.TrialDays
 		if typ == "recurring" {
@@ -133,19 +183,27 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 		if cancelURL == "" {
 			cancelURL = strings.TrimSpace(cfg.CheckoutCancelURL)
 		}
+		if !isValidPublicURL(successURL) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "URL de sucesso inválida."})
+			return
+		}
+		if !isValidPublicURL(cancelURL) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "URL de cancelamento inválida."})
+			return
+		}
 
 		metadata := sanitizeMetadata(body.Metadata)
 
 		recordID, err := store.CreateBillingRecord(billingstore.CreateBillingRecordInput{
 			Type:               typ,
-			Stage:              strings.TrimSpace(body.Stage),
+			Stage:              stage,
 			Description:        description,
 			ProductName:        productName,
 			ProductDescription: productDescription,
 			ProductImageURL:    productImageURL,
 			TrialDays:          trialDays,
 			CustomerEmail:      customerEmail,
-			CustomerName:       strings.TrimSpace(body.CustomerName),
+			CustomerName:       customerName,
 			AmountMinor:        amountMinor,
 			Currency:           currency,
 			Interval:           interval,
@@ -175,15 +233,11 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 		if trialDays > 0 {
 			stripeMeta["trialDays"] = strconv.FormatInt(trialDays, 10)
 		}
-		if stage := strings.TrimSpace(body.Stage); stage != "" {
-			stripeMeta["stage"] = stage
-		}
+		stripeMeta["stage"] = stage
 		if customerEmail != "" {
 			stripeMeta["customerEmail"] = customerEmail
 		}
-		if customerName := strings.TrimSpace(body.CustomerName); customerName != "" {
-			stripeMeta["customerName"] = customerName
-		}
+		stripeMeta["customerName"] = customerName
 		for key, value := range metadata {
 			stripeMeta[key] = value
 		}
@@ -314,6 +368,43 @@ func sanitizeMetadata(raw map[string]string) map[string]string {
 func isValidSimpleEmail(email string) bool {
 	email = strings.TrimSpace(email)
 	return strings.Contains(email, "@") && strings.Contains(email, ".")
+}
+
+func isValidCustomerName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if len(trimmed) < 2 || len(trimmed) > 90 {
+		return false
+	}
+	return !hasDisallowedChars(trimmed)
+}
+
+func isValidUserText(value string, min, max int) bool {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < min || len(trimmed) > max {
+		return false
+	}
+	return !hasDisallowedChars(trimmed)
+}
+
+func hasDisallowedChars(value string) bool {
+	return strings.ContainsAny(value, "<>{}[]\\^`|")
+}
+
+func isValidPublicURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme == "https" {
+		return true
+	}
+	hostname := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return scheme == "http" && (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1")
 }
 
 func toMinorUnits(amountRaw json.RawMessage, currency string) (int64, error) {

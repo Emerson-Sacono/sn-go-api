@@ -28,9 +28,19 @@ type OverviewStore struct {
 }
 
 type OverviewResult struct {
-	Stats         OverviewStats
-	Records       []BillingRecordPayload
-	Subscriptions []SubscriptionPayload
+	Stats     OverviewStats
+	OneTime   TablePage[OneTimeTableRow]
+	Recurring TablePage[RecurringTableRow]
+}
+
+type TablePage[T any] struct {
+	Items      []T   `json:"items"`
+	Page       int64 `json:"page"`
+	PageSize   int64 `json:"pageSize"`
+	TotalItems int64 `json:"totalItems"`
+	TotalPages int64 `json:"totalPages"`
+	HasPrev    bool  `json:"hasPrev"`
+	HasNext    bool  `json:"hasNext"`
 }
 
 type OverviewStats struct {
@@ -39,6 +49,32 @@ type OverviewStats struct {
 	RecurringActive    int64 `json:"recurringActive"`
 	RecurringCanceled  int64 `json:"recurringCanceled"`
 	RecurringAttention int64 `json:"recurringAttention"`
+}
+
+type OneTimeTableRow struct {
+	ID          string `json:"id"`
+	Client      string `json:"client"`
+	Description string `json:"description"`
+	AmountMinor int64  `json:"amountMinor"`
+	Currency    string `json:"currency"`
+	Status      string `json:"status"`
+	CreatedAt   any    `json:"createdAt"`
+	PaidAt      any    `json:"paidAt"`
+}
+
+type RecurringTableRow struct {
+	ID                   string `json:"id"`
+	Source               string `json:"source"`
+	Client               string `json:"client"`
+	Description          string `json:"description"`
+	AmountMinor          *int64 `json:"amountMinor,omitempty"`
+	Currency             string `json:"currency,omitempty"`
+	Status               string `json:"status"`
+	NextCycle            any    `json:"nextCycle"`
+	UpdatedAt            any    `json:"updatedAt"`
+	CancellationReason   any    `json:"cancellationReason,omitempty"`
+	CancellationFeedback any    `json:"cancellationFeedback,omitempty"`
+	CancellationComment  any    `json:"cancellationComment,omitempty"`
 }
 
 type BillingRecordPayload struct {
@@ -241,27 +277,9 @@ func connectMongoClient(appName, uri string) (*mongo.Client, error) {
 	return client, nil
 }
 
-func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
+func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage, recurringPageSize int64) (OverviewResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
-
-	records := make([]billingRecordDoc, 0, limit)
-	cursor, err := s.billingRecords.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(limit))
-	if err != nil {
-		return OverviewResult{}, err
-	}
-	if err := cursor.All(ctx, &records); err != nil {
-		return OverviewResult{}, err
-	}
-
-	subscriptions := make([]subscriptionDoc, 0, limit)
-	subCursor, err := s.subscriptions.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "updatedAt", Value: -1}}).SetLimit(limit))
-	if err != nil {
-		return OverviewResult{}, err
-	}
-	if err := subCursor.All(ctx, &subscriptions); err != nil {
-		return OverviewResult{}, err
-	}
 
 	oneTimePaid, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "one_time", "status": "paid"})
 	if err != nil {
@@ -293,6 +311,142 @@ func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
 		return OverviewResult{}, err
 	}
 
+	oneTimeTotal, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "one_time"})
+	if err != nil {
+		return OverviewResult{}, err
+	}
+	oneTimePager := normalizePagination(oneTimeTotal, oneTimePage, oneTimePageSize)
+	oneTimeDocs := make([]billingRecordDoc, 0, oneTimePager.PageSize)
+	oneTimeCursor, err := s.billingRecords.Find(
+		ctx,
+		bson.M{"type": "one_time"},
+		options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: -1}}).
+			SetSkip((oneTimePager.Page-1)*oneTimePager.PageSize).
+			SetLimit(oneTimePager.PageSize),
+	)
+	if err != nil {
+		return OverviewResult{}, err
+	}
+	if err := oneTimeCursor.All(ctx, &oneTimeDocs); err != nil {
+		return OverviewResult{}, err
+	}
+
+	recurringTotalRecords, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "recurring"})
+	if err != nil {
+		return OverviewResult{}, err
+	}
+	subscriptionIDsAny, err := s.billingRecords.Distinct(
+		ctx,
+		"stripeSubscriptionId",
+		bson.M{
+			"type":                 "recurring",
+			"stripeSubscriptionId": bson.M{"$exists": true, "$ne": ""},
+		},
+	)
+	if err != nil {
+		return OverviewResult{}, err
+	}
+	subscriptionIDs := make([]string, 0, len(subscriptionIDsAny))
+	for _, raw := range subscriptionIDsAny {
+		id := cleanString(raw)
+		if id == "" {
+			continue
+		}
+		subscriptionIDs = append(subscriptionIDs, id)
+	}
+
+	legacyFilter := bson.M{
+		"subscriptionId": bson.M{"$exists": true, "$ne": ""},
+	}
+	if len(subscriptionIDs) > 0 {
+		legacyFilter["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
+	}
+
+	legacyTotal, err := s.subscriptions.CountDocuments(ctx, legacyFilter)
+	if err != nil {
+		return OverviewResult{}, err
+	}
+
+	recurringTotal := recurringTotalRecords + legacyTotal
+	recurringPager := normalizePagination(recurringTotal, recurringPage, recurringPageSize)
+	recurringRows := make([]RecurringTableRow, 0, recurringPager.PageSize)
+	recurringOffset := (recurringPager.Page - 1) * recurringPager.PageSize
+
+	if recurringOffset < recurringTotalRecords {
+		recurringDocs := make([]billingRecordDoc, 0, recurringPager.PageSize)
+		recurringCursor, findErr := s.billingRecords.Find(
+			ctx,
+			bson.M{"type": "recurring"},
+			options.Find().
+				SetSort(bson.D{{Key: "createdAt", Value: -1}}).
+				SetSkip(recurringOffset).
+				SetLimit(recurringPager.PageSize),
+		)
+		if findErr != nil {
+			return OverviewResult{}, findErr
+		}
+		if allErr := recurringCursor.All(ctx, &recurringDocs); allErr != nil {
+			return OverviewResult{}, allErr
+		}
+
+		for _, item := range recurringDocs {
+			recurringRows = append(recurringRows, RecurringTableRow{
+				ID:                   item.ID.Hex(),
+				Source:               "billing_record",
+				Client:               firstNonEmptyString(cleanString(item.CustomerName), cleanString(item.CustomerEmail), "-"),
+				Description:          composeDisplayDescription(item.Description, item.ProductName, item.TrialDays),
+				AmountMinor:          ptrInt64(item.AmountMinor),
+				Currency:             item.Currency,
+				Status:               item.Status,
+				NextCycle:            firstNonNil(isoOrNil(item.CurrentPeriodEnd), isoOrNil(item.LastInvoiceAt), isoOrNil(item.CheckoutExpiresAt)),
+				UpdatedAt:            isoOrNil(item.UpdatedAt),
+				CancellationReason:   item.CancellationReason,
+				CancellationFeedback: item.CancellationFeedback,
+				CancellationComment:  item.CancellationComment,
+			})
+		}
+	}
+
+	remaining := recurringPager.PageSize - int64(len(recurringRows))
+	if remaining > 0 {
+		legacySkip := int64(0)
+		if recurringOffset > recurringTotalRecords {
+			legacySkip = recurringOffset - recurringTotalRecords
+		}
+
+		legacyDocs := make([]subscriptionDoc, 0, remaining)
+		legacyCursor, findErr := s.subscriptions.Find(
+			ctx,
+			legacyFilter,
+			options.Find().
+				SetSort(bson.D{{Key: "updatedAt", Value: -1}}).
+				SetSkip(legacySkip).
+				SetLimit(remaining),
+		)
+		if findErr != nil {
+			return OverviewResult{}, findErr
+		}
+		if allErr := legacyCursor.All(ctx, &legacyDocs); allErr != nil {
+			return OverviewResult{}, allErr
+		}
+
+		for _, item := range legacyDocs {
+			recurringRows = append(recurringRows, RecurringTableRow{
+				ID:                   item.ID.Hex(),
+				Source:               "legacy_subscription",
+				Client:               firstNonEmptyString(cleanString(item.Name), cleanString(item.Email), "-"),
+				Description:          firstNonEmptyString(cleanString(item.Plan), "Assinatura legada"),
+				Status:               firstNonEmptyString(cleanString(item.Status), "active"),
+				NextCycle:            firstNonNil(isoOrNil(item.CurrentPeriodEnd), isoOrNil(item.CancelAt)),
+				UpdatedAt:            firstNonNil(isoOrNil(item.UpdatedAt), isoOrNil(item.LastInvoiceAt)),
+				CancellationReason:   item.CancellationReason,
+				CancellationFeedback: item.CancellationFeedback,
+				CancellationComment:  item.CancellationComment,
+			})
+		}
+	}
+
 	out := OverviewResult{
 		Stats: OverviewStats{
 			OneTimePaid:        oneTimePaid,
@@ -301,68 +455,36 @@ func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
 			RecurringCanceled:  recurringCanceled,
 			RecurringAttention: recurringAttention,
 		},
-		Records:       make([]BillingRecordPayload, 0, len(records)),
-		Subscriptions: make([]SubscriptionPayload, 0, len(subscriptions)),
+		OneTime: TablePage[OneTimeTableRow]{
+			Items:      make([]OneTimeTableRow, 0, len(oneTimeDocs)),
+			Page:       oneTimePager.Page,
+			PageSize:   oneTimePager.PageSize,
+			TotalItems: oneTimePager.TotalItems,
+			TotalPages: oneTimePager.TotalPages,
+			HasPrev:    oneTimePager.HasPrev,
+			HasNext:    oneTimePager.HasNext,
+		},
+		Recurring: TablePage[RecurringTableRow]{
+			Items:      recurringRows,
+			Page:       recurringPager.Page,
+			PageSize:   recurringPager.PageSize,
+			TotalItems: recurringPager.TotalItems,
+			TotalPages: recurringPager.TotalPages,
+			HasPrev:    recurringPager.HasPrev,
+			HasNext:    recurringPager.HasNext,
+		},
 	}
 
-	for _, item := range records {
-		out.Records = append(out.Records, BillingRecordPayload{
-			ID:                    item.ID.Hex(),
-			Type:                  item.Type,
-			Stage:                 item.Stage,
-			Description:           item.Description,
-			ProductName:           item.ProductName,
-			ProductDescription:    item.ProductDescription,
-			ProductImageURL:       item.ProductImageURL,
-			CancellationReason:    item.CancellationReason,
-			CancellationFeedback:  item.CancellationFeedback,
-			CancellationComment:   item.CancellationComment,
-			CustomerEmail:         item.CustomerEmail,
-			CustomerName:          item.CustomerName,
-			AmountMinor:           item.AmountMinor,
-			Currency:              item.Currency,
-			Interval:              item.Interval,
-			IntervalCount:         item.IntervalCount,
-			TrialDays:             item.TrialDays,
-			Status:                item.Status,
-			CheckoutSessionID:     item.CheckoutSessionID,
-			CheckoutURL:           item.CheckoutURL,
-			CheckoutExpiresAt:     isoOrNil(item.CheckoutExpiresAt),
-			StripeCustomerID:      item.StripeCustomerID,
-			StripeSubscriptionID:  item.StripeSubscriptionID,
-			StripePaymentIntentID: item.StripePaymentIntentID,
-			CurrentPeriodEnd:      isoOrNil(item.CurrentPeriodEnd),
-			LastInvoiceStatus:     item.LastInvoiceStatus,
-			LastInvoiceAt:         isoOrNil(item.LastInvoiceAt),
-			PaidAt:                isoOrNil(item.PaidAt),
-			CanceledAt:            isoOrNil(item.CanceledAt),
-			Metadata:              item.Metadata,
-			CreatedAt:             isoOrNil(item.CreatedAt),
-			UpdatedAt:             isoOrNil(item.UpdatedAt),
-		})
-	}
-
-	for _, item := range subscriptions {
-		out.Subscriptions = append(out.Subscriptions, SubscriptionPayload{
-			ID:                   item.ID.Hex(),
-			StripeCustomerID:     item.StripeCustomerID,
-			SubscriptionID:       item.SubscriptionID,
-			Email:                item.Email,
-			Name:                 item.Name,
-			Phone:                item.Phone,
-			Plan:                 item.Plan,
-			CancellationReason:   item.CancellationReason,
-			CancellationFeedback: item.CancellationFeedback,
-			CancellationComment:  item.CancellationComment,
-			PriceID:              item.PriceID,
-			Status:               item.Status,
-			CurrentPeriodEnd:     isoOrNil(item.CurrentPeriodEnd),
-			TrialEnd:             isoOrNil(item.TrialEnd),
-			CancelAt:             isoOrNil(item.CancelAt),
-			CancelAtPeriodEnd:    item.CancelAtPeriodEnd,
-			LastInvoiceStatus:    item.LastInvoiceStatus,
-			LastInvoiceAt:        isoOrNil(item.LastInvoiceAt),
-			UpdatedAt:            isoOrNil(item.UpdatedAt),
+	for _, item := range oneTimeDocs {
+		out.OneTime.Items = append(out.OneTime.Items, OneTimeTableRow{
+			ID:          item.ID.Hex(),
+			Client:      firstNonEmptyString(cleanString(item.CustomerName), cleanString(item.CustomerEmail), "-"),
+			Description: composeDisplayDescription(item.Description, item.ProductName, item.TrialDays),
+			AmountMinor: item.AmountMinor,
+			Currency:    item.Currency,
+			Status:      item.Status,
+			CreatedAt:   isoOrNil(item.CreatedAt),
+			PaidAt:      isoOrNil(item.PaidAt),
 		})
 	}
 
@@ -519,6 +641,127 @@ func isoOrNil(t *time.Time) any {
 		return nil
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+func normalizePagination(totalItems, page, pageSize int64) TablePage[struct{}] {
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	totalPages := int64(1)
+	if totalItems > 0 {
+		totalPages = (totalItems + pageSize - 1) / pageSize
+		if totalPages < 1 {
+			totalPages = 1
+		}
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	return TablePage[struct{}]{
+		Page:       page,
+		PageSize:   pageSize,
+		TotalItems: totalItems,
+		TotalPages: totalPages,
+		HasPrev:    page > 1,
+		HasNext:    page < totalPages,
+	}
+}
+
+func cleanString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", value))
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func ptrInt64(value int64) *int64 {
+	v := value
+	return &v
+}
+
+func composeDisplayDescription(base string, productName any, trialDays any) string {
+	description := firstNonEmptyString(cleanString(productName), strings.TrimSpace(base))
+	if description == "" {
+		description = "-"
+	}
+	days := toInt64(trialDays)
+	if days > 0 {
+		return fmt.Sprintf("%s | Trial: %d dia(s)", description, days)
+	}
+	return description
+}
+
+func toInt64(value any) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int8:
+		return int64(v)
+	case int16:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case int64:
+		return v
+	case uint:
+		return int64(v)
+	case uint8:
+		return int64(v)
+	case uint16:
+		return int64(v)
+	case uint32:
+		return int64(v)
+	case uint64:
+		if v > uint64(^uint64(0)>>1) {
+			return 0
+		}
+		return int64(v)
+	case float32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case primitive.Decimal128:
+		bigInt, _, err := v.BigInt()
+		if err != nil || bigInt == nil {
+			return 0
+		}
+		return bigInt.Int64()
+	default:
+		return 0
+	}
 }
 
 func databaseNameFromURI(rawURI string) string {
