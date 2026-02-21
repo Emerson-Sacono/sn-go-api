@@ -1,0 +1,84 @@
+name: Deploy API Go VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-sn-go-api-vps
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ vars.VPS_PORT || secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          PORT="${VPS_PORT:-22}"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          touch ~/.ssh/known_hosts
+          ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on VPS
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ vars.VPS_PORT || secrets.VPS_PORT }}
+          VPS_APP_PATH: ${{ vars.VPS_APP_PATH || secrets.VPS_APP_PATH }}
+        run: |
+          set -euo pipefail
+
+          PORT="${VPS_PORT:-22}"
+
+          if [ -z "${VPS_APP_PATH:-}" ]; then
+            echo "VPS_APP_PATH is empty. Configure it in repository Variables."
+            exit 1
+          fi
+
+          ssh -p "$PORT" "${VPS_USER}@${VPS_HOST}" << EOF
+          set -euo pipefail
+
+          if ! command -v go >/dev/null 2>&1; then
+            echo "Go is not installed on VPS."
+            exit 1
+          fi
+
+          if ! command -v pm2 >/dev/null 2>&1; then
+            echo "PM2 is not installed on VPS."
+            exit 1
+          fi
+
+          cd "${VPS_APP_PATH}"
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+
+          go build -o bin/sn-go-api ./cmd/api
+
+          if pm2 describe sn-go-api >/dev/null 2>&1; then
+            pm2 restart sn-go-api --update-env
+          else
+            pm2 start ./bin/sn-go-api --name sn-go-api --cwd "${VPS_APP_PATH}"
+          fi
+
+          pm2 save
+          pm2 status
+          git rev-parse --short HEAD
+          EOF
