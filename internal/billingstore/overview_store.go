@@ -46,12 +46,16 @@ type BillingRecordPayload struct {
 	Type                  string `json:"type"`
 	Stage                 any    `json:"stage"`
 	Description           string `json:"description"`
+	ProductName           any    `json:"productName"`
+	ProductDescription    any    `json:"productDescription"`
+	ProductImageURL       any    `json:"productImageUrl"`
 	CustomerEmail         any    `json:"customerEmail"`
 	CustomerName          any    `json:"customerName"`
 	AmountMinor           int64  `json:"amountMinor"`
 	Currency              string `json:"currency"`
 	Interval              any    `json:"interval"`
 	IntervalCount         any    `json:"intervalCount"`
+	TrialDays             any    `json:"trialDays"`
 	Status                string `json:"status"`
 	CheckoutSessionID     any    `json:"checkoutSessionId"`
 	CheckoutURL           any    `json:"checkoutUrl"`
@@ -93,12 +97,16 @@ type billingRecordDoc struct {
 	Type                  string             `bson:"type"`
 	Stage                 any                `bson:"stage,omitempty"`
 	Description           string             `bson:"description"`
+	ProductName           any                `bson:"productName,omitempty"`
+	ProductDescription    any                `bson:"productDescription,omitempty"`
+	ProductImageURL       any                `bson:"productImageUrl,omitempty"`
 	CustomerEmail         any                `bson:"customerEmail,omitempty"`
 	CustomerName          any                `bson:"customerName,omitempty"`
 	AmountMinor           int64              `bson:"amountMinor"`
 	Currency              string             `bson:"currency"`
 	Interval              any                `bson:"interval,omitempty"`
 	IntervalCount         any                `bson:"intervalCount,omitempty"`
+	TrialDays             any                `bson:"trialDays,omitempty"`
 	Status                string             `bson:"status"`
 	CheckoutSessionID     any                `bson:"checkoutSessionId,omitempty"`
 	CheckoutURL           any                `bson:"checkoutUrl,omitempty"`
@@ -136,16 +144,20 @@ type subscriptionDoc struct {
 }
 
 type CreateBillingRecordInput struct {
-	Type          string
-	Stage         string
-	Description   string
-	CustomerEmail string
-	CustomerName  string
-	AmountMinor   int64
-	Currency      string
-	Interval      string
-	IntervalCount int64
-	Metadata      map[string]string
+	Type               string
+	Stage              string
+	Description        string
+	ProductName        string
+	ProductDescription string
+	ProductImageURL    string
+	TrialDays          int64
+	CustomerEmail      string
+	CustomerName       string
+	AmountMinor        int64
+	Currency           string
+	Interval           string
+	IntervalCount      int64
+	Metadata           map[string]string
 }
 
 func NewOverviewStore(cfg config.Config) (*OverviewStore, error) {
@@ -287,12 +299,16 @@ func (s *OverviewStore) GetOverview(limit int64) (OverviewResult, error) {
 			Type:                  item.Type,
 			Stage:                 item.Stage,
 			Description:           item.Description,
+			ProductName:           item.ProductName,
+			ProductDescription:    item.ProductDescription,
+			ProductImageURL:       item.ProductImageURL,
 			CustomerEmail:         item.CustomerEmail,
 			CustomerName:          item.CustomerName,
 			AmountMinor:           item.AmountMinor,
 			Currency:              item.Currency,
 			Interval:              item.Interval,
 			IntervalCount:         item.IntervalCount,
+			TrialDays:             item.TrialDays,
 			Status:                item.Status,
 			CheckoutSessionID:     item.CheckoutSessionID,
 			CheckoutURL:           item.CheckoutURL,
@@ -358,12 +374,24 @@ func (s *OverviewStore) CreateBillingRecord(input CreateBillingRecordInput) (str
 	if strings.TrimSpace(input.CustomerName) != "" {
 		doc["customerName"] = strings.TrimSpace(input.CustomerName)
 	}
+	if strings.TrimSpace(input.ProductName) != "" {
+		doc["productName"] = strings.TrimSpace(input.ProductName)
+	}
+	if strings.TrimSpace(input.ProductDescription) != "" {
+		doc["productDescription"] = strings.TrimSpace(input.ProductDescription)
+	}
+	if strings.TrimSpace(input.ProductImageURL) != "" {
+		doc["productImageUrl"] = strings.TrimSpace(input.ProductImageURL)
+	}
 	if input.Type == "recurring" {
 		if strings.TrimSpace(input.Interval) != "" {
 			doc["interval"] = strings.TrimSpace(input.Interval)
 		}
 		if input.IntervalCount > 0 {
 			doc["intervalCount"] = input.IntervalCount
+		}
+		if input.TrialDays > 0 {
+			doc["trialDays"] = input.TrialDays
 		}
 	}
 	if len(input.Metadata) > 0 {

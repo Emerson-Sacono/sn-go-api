@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,6 +199,10 @@ func (s *OverviewStore) UpsertBillingFromCheckoutSession(raw json.RawMessage) er
 	customerName := firstNonEmpty(getStringAny(customerDetails["name"]), metadata["customerName"])
 	stage := strings.TrimSpace(metadata["stage"])
 	description := firstNonEmpty(metadata["description"], "Cobranca personalizada")
+	productName := strings.TrimSpace(metadata["productName"])
+	productDescription := strings.TrimSpace(metadata["productDescription"])
+	productImageURL := strings.TrimSpace(metadata["productImageUrl"])
+	trialDays := parsePositiveInt64String(metadata["trialDays"])
 	amountMinor := resolveCheckoutAmountMinor(obj)
 	currency := resolveCheckoutCurrency(getStringAny(obj["currency"]))
 	checkoutURL := getStringAny(obj["url"])
@@ -228,6 +233,18 @@ func (s *OverviewStore) UpsertBillingFromCheckoutSession(raw json.RawMessage) er
 	}
 	if customerName != "" {
 		sharedSet["customerName"] = customerName
+	}
+	if productName != "" {
+		sharedSet["productName"] = productName
+	}
+	if productDescription != "" {
+		sharedSet["productDescription"] = productDescription
+	}
+	if productImageURL != "" {
+		sharedSet["productImageUrl"] = productImageURL
+	}
+	if trialDays > 0 {
+		sharedSet["trialDays"] = trialDays
 	}
 	if checkoutURL != "" {
 		sharedSet["checkoutUrl"] = checkoutURL
@@ -279,6 +296,18 @@ func (s *OverviewStore) UpsertBillingFromCheckoutSession(raw json.RawMessage) er
 	}
 	if customerName != "" {
 		setOnInsert["customerName"] = customerName
+	}
+	if productName != "" {
+		setOnInsert["productName"] = productName
+	}
+	if productDescription != "" {
+		setOnInsert["productDescription"] = productDescription
+	}
+	if productImageURL != "" {
+		setOnInsert["productImageUrl"] = productImageURL
+	}
+	if trialDays > 0 {
+		setOnInsert["trialDays"] = trialDays
 	}
 
 	_, err = s.billingRecords.UpdateOne(
@@ -350,6 +379,10 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	amountMinor := maxInt64(1, getInt64Any(price["unit_amount"]))
 	stage := strings.TrimSpace(metadata["stage"])
 	description := firstNonEmpty(metadata["description"], getStringAny(price["nickname"]), "Assinatura personalizada")
+	productName := strings.TrimSpace(metadata["productName"])
+	productDescription := strings.TrimSpace(metadata["productDescription"])
+	productImageURL := strings.TrimSpace(metadata["productImageUrl"])
+	trialDays := parsePositiveInt64String(metadata["trialDays"])
 	stripeCustomerID := getExpandableID(obj["customer"])
 	canceledAt := toTimePtr(getInt64Any(obj["canceled_at"]))
 	currentPeriodEnd := toTimePtr(getInt64Any(obj["current_period_end"]))
@@ -367,6 +400,18 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 	}
 	if stage != "" {
 		sharedSet["stage"] = stage
+	}
+	if productName != "" {
+		sharedSet["productName"] = productName
+	}
+	if productDescription != "" {
+		sharedSet["productDescription"] = productDescription
+	}
+	if productImageURL != "" {
+		sharedSet["productImageUrl"] = productImageURL
+	}
+	if trialDays > 0 {
+		sharedSet["trialDays"] = trialDays
 	}
 	if stripeCustomerID != "" {
 		sharedSet["stripeCustomerId"] = stripeCustomerID
@@ -400,18 +445,23 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 		}
 	}
 
+	setOnInsert := bson.M{
+		"type":        "recurring",
+		"description": description,
+		"amountMinor": amountMinor,
+		"currency":    currency,
+		"createdAt":   now,
+	}
+	if trialDays > 0 {
+		setOnInsert["trialDays"] = trialDays
+	}
+
 	_, err = s.billingRecords.UpdateOne(
 		ctx,
 		bson.M{"stripeSubscriptionId": subscriptionID},
 		bson.M{
-			"$set": sharedSet,
-			"$setOnInsert": bson.M{
-				"type":        "recurring",
-				"description": description,
-				"amountMinor": amountMinor,
-				"currency":    currency,
-				"createdAt":   now,
-			},
+			"$set":         sharedSet,
+			"$setOnInsert": setOnInsert,
 		},
 		options.Update().SetUpsert(true),
 	)
@@ -603,6 +653,18 @@ func getInt64Any(value any) int64 {
 	default:
 		return 0
 	}
+}
+
+func parsePositiveInt64String(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }
 
 func getBoolAny(value any) (bool, bool) {

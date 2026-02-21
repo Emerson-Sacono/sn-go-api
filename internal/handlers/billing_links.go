@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,18 +20,22 @@ import (
 )
 
 type createBillingLinkBody struct {
-	Type          string            `json:"type"`
-	Amount        json.RawMessage   `json:"amount"`
-	Currency      string            `json:"currency"`
-	Description   string            `json:"description"`
-	CustomerEmail string            `json:"customerEmail"`
-	CustomerName  string            `json:"customerName"`
-	Stage         string            `json:"stage"`
-	Interval      string            `json:"interval"`
-	IntervalCount int64             `json:"intervalCount"`
-	SuccessURL    string            `json:"successUrl"`
-	CancelURL     string            `json:"cancelUrl"`
-	Metadata      map[string]string `json:"metadata"`
+	Type               string            `json:"type"`
+	Amount             json.RawMessage   `json:"amount"`
+	Currency           string            `json:"currency"`
+	Description        string            `json:"description"`
+	ProductName        string            `json:"productName"`
+	ProductDescription string            `json:"productDescription"`
+	ProductImageURL    string            `json:"productImageUrl"`
+	TrialDays          int64             `json:"trialDays"`
+	CustomerEmail      string            `json:"customerEmail"`
+	CustomerName       string            `json:"customerName"`
+	Stage              string            `json:"stage"`
+	Interval           string            `json:"interval"`
+	IntervalCount      int64             `json:"intervalCount"`
+	SuccessURL         string            `json:"successUrl"`
+	CancelURL          string            `json:"cancelUrl"`
+	Metadata           map[string]string `json:"metadata"`
 }
 
 var zeroDecimalCurrencies = map[string]struct{}{
@@ -66,6 +71,20 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Descrição é obrigatória."})
 			return
 		}
+		productName := strings.TrimSpace(body.ProductName)
+		if productName == "" {
+			productName = description
+		}
+		productDescription := strings.TrimSpace(body.ProductDescription)
+		productImageURL := strings.TrimSpace(body.ProductImageURL)
+		if productImageURL != "" {
+			normalizedImageURL, err := normalizeProductImageURL(productImageURL)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Imagem do produto inválida. Use uma URL HTTPS pública (ou localhost em desenvolvimento)."})
+				return
+			}
+			productImageURL = normalizedImageURL
+		}
 
 		currency := strings.ToLower(strings.TrimSpace(body.Currency))
 		if currency == "" {
@@ -96,6 +115,15 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Intervalo é obrigatório para cobrança recorrente."})
 			return
 		}
+		trialDays := body.TrialDays
+		if typ == "recurring" {
+			if trialDays < 0 || trialDays > 365 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Free trial inválido. Informe de 1 a 365 dias."})
+				return
+			}
+		} else {
+			trialDays = 0
+		}
 
 		successURL := strings.TrimSpace(body.SuccessURL)
 		if successURL == "" {
@@ -109,16 +137,20 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 		metadata := sanitizeMetadata(body.Metadata)
 
 		recordID, err := store.CreateBillingRecord(billingstore.CreateBillingRecordInput{
-			Type:          typ,
-			Stage:         strings.TrimSpace(body.Stage),
-			Description:   description,
-			CustomerEmail: customerEmail,
-			CustomerName:  strings.TrimSpace(body.CustomerName),
-			AmountMinor:   amountMinor,
-			Currency:      currency,
-			Interval:      interval,
-			IntervalCount: intervalCount,
-			Metadata:      metadata,
+			Type:               typ,
+			Stage:              strings.TrimSpace(body.Stage),
+			Description:        description,
+			ProductName:        productName,
+			ProductDescription: productDescription,
+			ProductImageURL:    productImageURL,
+			TrialDays:          trialDays,
+			CustomerEmail:      customerEmail,
+			CustomerName:       strings.TrimSpace(body.CustomerName),
+			AmountMinor:        amountMinor,
+			Currency:           currency,
+			Interval:           interval,
+			IntervalCount:      intervalCount,
+			Metadata:           metadata,
 		})
 		if err != nil {
 			log.Printf("[billing-links] erro ao criar billing record: %v", err)
@@ -130,6 +162,18 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 			"billingRecordId": recordID,
 			"billingType":     typ,
 			"description":     description,
+		}
+		if productName != "" {
+			stripeMeta["productName"] = productName
+		}
+		if productDescription != "" {
+			stripeMeta["productDescription"] = productDescription
+		}
+		if productImageURL != "" {
+			stripeMeta["productImageUrl"] = productImageURL
+		}
+		if trialDays > 0 {
+			stripeMeta["trialDays"] = strconv.FormatInt(trialDays, 10)
 		}
 		if stage := strings.TrimSpace(body.Stage); stage != "" {
 			stripeMeta["stage"] = stage
@@ -157,9 +201,15 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 				Currency:   stripe.String(currency),
 				UnitAmount: stripe.Int64(amountMinor),
 				ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-					Name: stripe.String(description),
+					Name: stripe.String(productName),
 				},
 			},
+		}
+		if productDescription != "" {
+			lineItem.PriceData.ProductData.Description = stripe.String(productDescription)
+		}
+		if productImageURL != "" {
+			lineItem.PriceData.ProductData.Images = []*string{stripe.String(productImageURL)}
 		}
 
 		if typ == "recurring" {
@@ -184,7 +234,11 @@ func BillingLinks(cfg config.Config, store *billingstore.OverviewStore, authStor
 		if typ == "recurring" {
 			params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
 			params.SubscriptionData = &stripe.CheckoutSessionSubscriptionDataParams{
-				Metadata: stripeMeta,
+				Metadata:    stripeMeta,
+				Description: stripe.String(description),
+			}
+			if trialDays > 0 {
+				params.SubscriptionData.TrialPeriodDays = stripe.Int64(trialDays)
 			}
 		} else {
 			params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
@@ -317,4 +371,26 @@ func withCheckoutSessionPlaceholder(baseURL string) string {
 		separator = "&"
 	}
 	return trimmed + separator + "session_id={CHECKOUT_SESSION_ID}"
+}
+
+func normalizeProductImageURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("missing scheme or host")
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme == "https" {
+		return parsed.String(), nil
+	}
+
+	hostname := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if scheme == "http" && (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1") {
+		return parsed.String(), nil
+	}
+
+	return "", fmt.Errorf("unsupported scheme")
 }
