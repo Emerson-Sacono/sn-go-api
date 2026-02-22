@@ -260,13 +260,21 @@ func NewOverviewStore(cfg config.Config) (*OverviewStore, error) {
 	log.Printf("[billingstore] mongo billing conectado host=%s db=%s collection=billingrecords", mongoTarget(billingURI), billingDB)
 	log.Printf("[billingstore] mongo customers conectado host=%s db=%s collection=customersubscriptions", mongoTarget(customersURI), customersDB)
 
-	return &OverviewStore{
+	store := &OverviewStore{
 		billingClient:   billingClient,
 		customersClient: customersClient,
 		billingRecords:  billingClient.Database(billingDB).Collection("billingrecords"),
 		subscriptions:   customersClient.Database(customersDB).Collection("customersubscriptions"),
 		requestTimeout:  8 * time.Second,
-	}, nil
+	}
+
+	if err := store.ensureIndexes(); err != nil {
+		_ = billingClient.Disconnect(context.Background())
+		_ = customersClient.Disconnect(context.Background())
+		return nil, err
+	}
+
+	return store, nil
 }
 
 func connectMongoClient(appName, uri string) (*mongo.Client, error) {
@@ -289,6 +297,110 @@ func connectMongoClient(appName, uri string) (*mongo.Client, error) {
 	return client, nil
 }
 
+func (s *OverviewStore) ensureIndexes() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	billingIndexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "type", Value: 1}, {Key: "status", Value: 1}, {Key: "createdAt", Value: -1}},
+			Options: options.Index().SetName("idx_type_status_createdAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "type", Value: 1}, {Key: "status", Value: 1}, {Key: "updatedAt", Value: -1}},
+			Options: options.Index().SetName("idx_type_status_updatedAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "type", Value: 1}, {Key: "createdAt", Value: -1}},
+			Options: options.Index().SetName("idx_type_createdAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "type", Value: 1}, {Key: "updatedAt", Value: -1}},
+			Options: options.Index().SetName("idx_type_updatedAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "checkoutSessionId", Value: 1}},
+			Options: options.Index().SetName("idx_checkoutSessionId"),
+		},
+		{
+			Keys:    bson.D{{Key: "stripeSubscriptionId", Value: 1}},
+			Options: options.Index().SetName("idx_stripeSubscriptionId"),
+		},
+		{
+			Keys:    bson.D{{Key: "customerEmail", Value: 1}},
+			Options: options.Index().SetName("idx_customerEmail"),
+		},
+		{
+			Keys:    bson.D{{Key: "deletedAt", Value: 1}},
+			Options: options.Index().SetName("idx_deletedAt"),
+		},
+	}
+	if err := createIndexesIgnoreConflicts(ctx, s.billingRecords, billingIndexes); err != nil {
+		return fmt.Errorf("falha ao criar índices de billingrecords: %w", err)
+	}
+
+	subscriptionIndexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "subscriptionId", Value: 1}},
+			Options: options.Index().SetName("idx_subscriptionId"),
+		},
+		{
+			Keys:    bson.D{{Key: "stripeCustomerId", Value: 1}},
+			Options: options.Index().SetName("idx_stripeCustomerId"),
+		},
+		{
+			Keys:    bson.D{{Key: "status", Value: 1}, {Key: "updatedAt", Value: -1}},
+			Options: options.Index().SetName("idx_status_updatedAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "updatedAt", Value: -1}},
+			Options: options.Index().SetName("idx_updatedAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "email", Value: 1}, {Key: "updatedAt", Value: -1}},
+			Options: options.Index().SetName("idx_email_updatedAt_desc"),
+		},
+		{
+			Keys:    bson.D{{Key: "deletedAt", Value: 1}},
+			Options: options.Index().SetName("idx_deletedAt"),
+		},
+	}
+	if err := createIndexesIgnoreConflicts(ctx, s.subscriptions, subscriptionIndexes); err != nil {
+		return fmt.Errorf("falha ao criar índices de customersubscriptions: %w", err)
+	}
+	return nil
+}
+
+func createIndexesIgnoreConflicts(ctx context.Context, collection *mongo.Collection, models []mongo.IndexModel) error {
+	for _, model := range models {
+		if _, err := collection.Indexes().CreateOne(ctx, model); err != nil {
+			if isIgnorableIndexConflict(err) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func isIgnorableIndexConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var cmdErr mongo.CommandError
+	if errors.As(err, &cmdErr) {
+		if cmdErr.Code == 85 || cmdErr.Code == 86 {
+			return true
+		}
+	}
+
+	lowerMessage := strings.ToLower(err.Error())
+	return strings.Contains(lowerMessage, "index already exists with a different name") ||
+		strings.Contains(lowerMessage, "indexoptionsconflict") ||
+		strings.Contains(lowerMessage, "indexkeyspecsconflict")
+}
+
 func (s *OverviewStore) GetOverview(
 	oneTimePage,
 	oneTimePageSize,
@@ -302,32 +414,42 @@ func (s *OverviewStore) GetOverview(
 	oneTimeFilter := buildOneTimeFilter(filters.OneTime)
 	recurringRecordFilter := buildRecurringBillingFilter(filters.Recurring)
 
-	oneTimePaid, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "one_time", "status": "paid"})
+	oneTimePaidFilter := bson.M{"type": "one_time", "status": "paid"}
+	appendNotDeletedFilter(oneTimePaidFilter)
+	oneTimePaid, err := s.billingRecords.CountDocuments(ctx, oneTimePaidFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
-	oneTimeOpen, err := s.billingRecords.CountDocuments(ctx, bson.M{
+	oneTimeOpenFilter := bson.M{
 		"type":   "one_time",
 		"status": bson.M{"$in": bson.A{"link_created", "checkout_open", "checkout_completed"}},
-	})
+	}
+	appendNotDeletedFilter(oneTimeOpenFilter)
+	oneTimeOpen, err := s.billingRecords.CountDocuments(ctx, oneTimeOpenFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
-	recurringActive, err := s.billingRecords.CountDocuments(ctx, bson.M{
+	recurringActiveFilter := bson.M{
 		"type":   "recurring",
 		"status": bson.M{"$in": bson.A{"active", "trialing"}},
-	})
+	}
+	appendNotDeletedFilter(recurringActiveFilter)
+	recurringActive, err := s.billingRecords.CountDocuments(ctx, recurringActiveFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
-	recurringCanceled, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "recurring", "status": "canceled"})
+	recurringCanceledFilter := bson.M{"type": "recurring", "status": "canceled"}
+	appendNotDeletedFilter(recurringCanceledFilter)
+	recurringCanceled, err := s.billingRecords.CountDocuments(ctx, recurringCanceledFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
-	recurringAttention, err := s.billingRecords.CountDocuments(ctx, bson.M{
+	recurringAttentionFilter := bson.M{
 		"type":   "recurring",
 		"status": bson.M{"$in": bson.A{"past_due", "failed", "unpaid", "incomplete"}},
-	})
+	}
+	appendNotDeletedFilter(recurringAttentionFilter)
+	recurringAttention, err := s.billingRecords.CountDocuments(ctx, recurringAttentionFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
@@ -625,7 +747,9 @@ func (s *OverviewStore) ResolveStripeCustomerID(customerID, subscriptionID, emai
 
 	if strings.TrimSpace(subscriptionID) != "" {
 		var doc subscriptionDoc
-		err := s.subscriptions.FindOne(ctx, bson.M{"subscriptionId": strings.TrimSpace(subscriptionID)}).Decode(&doc)
+		filter := bson.M{"subscriptionId": strings.TrimSpace(subscriptionID)}
+		appendNotDeletedFilter(filter)
+		err := s.subscriptions.FindOne(ctx, filter).Decode(&doc)
 		if err == nil {
 			return strings.TrimSpace(doc.StripeCustomerID), nil
 		}
@@ -637,6 +761,7 @@ func (s *OverviewStore) ResolveStripeCustomerID(customerID, subscriptionID, emai
 	if strings.TrimSpace(email) != "" {
 		pattern := fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(email)))
 		filter := bson.M{"email": primitive.Regex{Pattern: pattern, Options: "i"}}
+		appendNotDeletedFilter(filter)
 
 		var doc subscriptionDoc
 		err := s.subscriptions.FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "updatedAt", Value: -1}})).Decode(&doc)
@@ -655,6 +780,7 @@ func buildOneTimeFilter(filter OverviewTableFilter) bson.M {
 	out := bson.M{
 		"type": "one_time",
 	}
+	appendNotDeletedFilter(out)
 	appendStatusFilter(out, filter.Status)
 	appendClientFilter(
 		out,
@@ -672,6 +798,7 @@ func buildRecurringBillingFilter(filter OverviewTableFilter) bson.M {
 	out := bson.M{
 		"type": "recurring",
 	}
+	appendNotDeletedFilter(out)
 	appendStatusFilter(out, filter.Status)
 	appendClientFilter(
 		out,
@@ -689,6 +816,7 @@ func buildLegacySubscriptionFilter(subscriptionIDs []string, filter OverviewTabl
 	out := bson.M{
 		"subscriptionId": bson.M{"$exists": true, "$ne": ""},
 	}
+	appendNotDeletedFilter(out)
 	if len(subscriptionIDs) > 0 {
 		out["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
 	}
@@ -790,6 +918,12 @@ func appendAndCondition(filter bson.M, condition bson.M) {
 		}
 	}
 	filter["$and"] = bson.A{condition}
+}
+
+func appendNotDeletedFilter(filter bson.M) {
+	appendAndCondition(filter, bson.M{
+		"deletedAt": bson.M{"$exists": false},
+	})
 }
 
 func cloneBsonMap(input bson.M) bson.M {
