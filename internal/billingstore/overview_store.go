@@ -33,6 +33,18 @@ type OverviewResult struct {
 	Recurring TablePage[RecurringTableRow]
 }
 
+type OverviewFilters struct {
+	OneTime   OverviewTableFilter
+	Recurring OverviewTableFilter
+}
+
+type OverviewTableFilter struct {
+	Status string
+	Client string
+	From   *time.Time
+	To     *time.Time
+}
+
 type TablePage[T any] struct {
 	Items      []T   `json:"items"`
 	Page       int64 `json:"page"`
@@ -277,9 +289,18 @@ func connectMongoClient(appName, uri string) (*mongo.Client, error) {
 	return client, nil
 }
 
-func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage, recurringPageSize int64) (OverviewResult, error) {
+func (s *OverviewStore) GetOverview(
+	oneTimePage,
+	oneTimePageSize,
+	recurringPage,
+	recurringPageSize int64,
+	filters OverviewFilters,
+) (OverviewResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
+
+	oneTimeFilter := buildOneTimeFilter(filters.OneTime)
+	recurringRecordFilter := buildRecurringBillingFilter(filters.Recurring)
 
 	oneTimePaid, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "one_time", "status": "paid"})
 	if err != nil {
@@ -311,7 +332,7 @@ func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage,
 		return OverviewResult{}, err
 	}
 
-	oneTimeTotal, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "one_time"})
+	oneTimeTotal, err := s.billingRecords.CountDocuments(ctx, oneTimeFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
@@ -319,7 +340,7 @@ func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage,
 	oneTimeDocs := make([]billingRecordDoc, 0, oneTimePager.PageSize)
 	oneTimeCursor, err := s.billingRecords.Find(
 		ctx,
-		bson.M{"type": "one_time"},
+		oneTimeFilter,
 		options.Find().
 			SetSort(bson.D{{Key: "createdAt", Value: -1}}).
 			SetSkip((oneTimePager.Page-1)*oneTimePager.PageSize).
@@ -332,17 +353,16 @@ func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage,
 		return OverviewResult{}, err
 	}
 
-	recurringTotalRecords, err := s.billingRecords.CountDocuments(ctx, bson.M{"type": "recurring"})
+	recurringTotalRecords, err := s.billingRecords.CountDocuments(ctx, recurringRecordFilter)
 	if err != nil {
 		return OverviewResult{}, err
 	}
+	subscriptionDistinctFilter := cloneBsonMap(recurringRecordFilter)
+	subscriptionDistinctFilter["stripeSubscriptionId"] = bson.M{"$exists": true, "$ne": ""}
 	subscriptionIDsAny, err := s.billingRecords.Distinct(
 		ctx,
 		"stripeSubscriptionId",
-		bson.M{
-			"type":                 "recurring",
-			"stripeSubscriptionId": bson.M{"$exists": true, "$ne": ""},
-		},
+		subscriptionDistinctFilter,
 	)
 	if err != nil {
 		return OverviewResult{}, err
@@ -356,12 +376,7 @@ func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage,
 		subscriptionIDs = append(subscriptionIDs, id)
 	}
 
-	legacyFilter := bson.M{
-		"subscriptionId": bson.M{"$exists": true, "$ne": ""},
-	}
-	if len(subscriptionIDs) > 0 {
-		legacyFilter["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
-	}
+	legacyFilter := buildLegacySubscriptionFilter(subscriptionIDs, filters.Recurring)
 
 	legacyTotal, err := s.subscriptions.CountDocuments(ctx, legacyFilter)
 	if err != nil {
@@ -377,7 +392,7 @@ func (s *OverviewStore) GetOverview(oneTimePage, oneTimePageSize, recurringPage,
 		recurringDocs := make([]billingRecordDoc, 0, recurringPager.PageSize)
 		recurringCursor, findErr := s.billingRecords.Find(
 			ctx,
-			bson.M{"type": "recurring"},
+			recurringRecordFilter,
 			options.Find().
 				SetSort(bson.D{{Key: "createdAt", Value: -1}}).
 				SetSkip(recurringOffset).
@@ -634,6 +649,134 @@ func (s *OverviewStore) ResolveStripeCustomerID(customerID, subscriptionID, emai
 	}
 
 	return "", nil
+}
+
+func buildOneTimeFilter(filter OverviewTableFilter) bson.M {
+	out := bson.M{
+		"type": "one_time",
+	}
+	appendStatusFilter(out, filter.Status)
+	appendClientFilter(out, filter.Client, "customerName", "customerEmail")
+	appendDateRangeFilter(out, "createdAt", filter.From, filter.To)
+	return out
+}
+
+func buildRecurringBillingFilter(filter OverviewTableFilter) bson.M {
+	out := bson.M{
+		"type": "recurring",
+	}
+	appendStatusFilter(out, filter.Status)
+	appendClientFilter(out, filter.Client, "customerName", "customerEmail")
+	appendDateRangeFilter(out, "updatedAt", filter.From, filter.To)
+	return out
+}
+
+func buildLegacySubscriptionFilter(subscriptionIDs []string, filter OverviewTableFilter) bson.M {
+	out := bson.M{
+		"subscriptionId": bson.M{"$exists": true, "$ne": ""},
+	}
+	if len(subscriptionIDs) > 0 {
+		out["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
+	}
+	appendStatusFilter(out, filter.Status)
+	appendClientFilter(out, filter.Client, "name", "email")
+	appendLegacyDateRangeFilter(out, filter.From, filter.To)
+	return out
+}
+
+func appendStatusFilter(filter bson.M, rawStatus string) {
+	status := strings.TrimSpace(strings.ToLower(rawStatus))
+	if status == "" {
+		return
+	}
+	appendAndCondition(filter, bson.M{
+		"status": primitive.Regex{
+			Pattern: fmt.Sprintf("^%s$", regexp.QuoteMeta(status)),
+			Options: "i",
+		},
+	})
+}
+
+func appendClientFilter(filter bson.M, rawTerm string, fields ...string) {
+	term := strings.TrimSpace(rawTerm)
+	if term == "" || len(fields) == 0 {
+		return
+	}
+
+	pattern := regexp.QuoteMeta(term)
+	orFilters := make(bson.A, 0, len(fields))
+	for _, field := range fields {
+		name := strings.TrimSpace(field)
+		if name == "" {
+			continue
+		}
+		orFilters = append(orFilters, bson.M{
+			name: primitive.Regex{
+				Pattern: pattern,
+				Options: "i",
+			},
+		})
+	}
+	if len(orFilters) == 0 {
+		return
+	}
+	appendAndCondition(filter, bson.M{"$or": orFilters})
+}
+
+func appendDateRangeFilter(filter bson.M, field string, from, to *time.Time) {
+	rangeFilter := buildRangeFilter(from, to)
+	if len(rangeFilter) == 0 {
+		return
+	}
+	appendAndCondition(filter, bson.M{
+		field: rangeFilter,
+	})
+}
+
+func appendLegacyDateRangeFilter(filter bson.M, from, to *time.Time) {
+	rangeFilter := buildRangeFilter(from, to)
+	if len(rangeFilter) == 0 {
+		return
+	}
+
+	appendAndCondition(filter, bson.M{
+		"$or": bson.A{
+			bson.M{"updatedAt": cloneBsonMap(rangeFilter)},
+			bson.M{"lastInvoiceAt": cloneBsonMap(rangeFilter)},
+		},
+	})
+}
+
+func buildRangeFilter(from, to *time.Time) bson.M {
+	out := bson.M{}
+	if from != nil && !from.IsZero() {
+		out["$gte"] = from.UTC()
+	}
+	if to != nil && !to.IsZero() {
+		out["$lt"] = to.UTC()
+	}
+	return out
+}
+
+func appendAndCondition(filter bson.M, condition bson.M) {
+	if len(condition) == 0 {
+		return
+	}
+	if current, ok := filter["$and"]; ok {
+		if clauses, castOK := current.(bson.A); castOK {
+			filter["$and"] = append(clauses, condition)
+			return
+		}
+	}
+	filter["$and"] = bson.A{condition}
+}
+
+func cloneBsonMap(input bson.M) bson.M {
+	out := bson.M{}
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
 }
 
 func isoOrNil(t *time.Time) any {
