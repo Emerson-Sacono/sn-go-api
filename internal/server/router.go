@@ -63,6 +63,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/console/billing/overview", handlers.BillingOverview(cfg, billingOverviewStore, authStore))
 	mux.HandleFunc("POST /api/console/billing/links", handlers.BillingLinks(cfg, billingOverviewStore, authStore))
 	mux.HandleFunc("POST /api/console/billing/delete", handlers.BillingDelete(cfg, billingOverviewStore, authStore))
+	mux.HandleFunc("POST /api/console/billing/restore", handlers.BillingRestore(cfg, billingOverviewStore, authStore))
 	mux.HandleFunc("POST /api/stripe/customer-portal", handlers.CustomerPortal(cfg, billingOverviewStore))
 
 	handler := withRecovery(

@@ -39,10 +39,11 @@ type OverviewFilters struct {
 }
 
 type OverviewTableFilter struct {
-	Status string
-	Client string
-	From   *time.Time
-	To     *time.Time
+	Status  string
+	Client  string
+	From    *time.Time
+	To      *time.Time
+	Deleted string
 }
 
 type TablePage[T any] struct {
@@ -72,6 +73,7 @@ type OneTimeTableRow struct {
 	Status      string `json:"status"`
 	CreatedAt   any    `json:"createdAt"`
 	PaidAt      any    `json:"paidAt"`
+	IsDeleted   bool   `json:"isDeleted"`
 }
 
 type RecurringTableRow struct {
@@ -87,6 +89,7 @@ type RecurringTableRow struct {
 	CancellationReason   any    `json:"cancellationReason,omitempty"`
 	CancellationFeedback any    `json:"cancellationFeedback,omitempty"`
 	CancellationComment  any    `json:"cancellationComment,omitempty"`
+	IsDeleted            bool   `json:"isDeleted"`
 }
 
 type BillingRecordPayload struct {
@@ -179,6 +182,7 @@ type billingRecordDoc struct {
 	Metadata              any                `bson:"metadata,omitempty"`
 	CreatedAt             *time.Time         `bson:"createdAt,omitempty"`
 	UpdatedAt             *time.Time         `bson:"updatedAt,omitempty"`
+	DeletedAt             *time.Time         `bson:"deletedAt,omitempty"`
 }
 
 type subscriptionDoc struct {
@@ -201,6 +205,7 @@ type subscriptionDoc struct {
 	LastInvoiceStatus    any                `bson:"lastInvoiceStatus,omitempty"`
 	LastInvoiceAt        *time.Time         `bson:"lastInvoiceAt,omitempty"`
 	UpdatedAt            *time.Time         `bson:"updatedAt,omitempty"`
+	DeletedAt            *time.Time         `bson:"deletedAt,omitempty"`
 }
 
 type CreateBillingRecordInput struct {
@@ -541,6 +546,7 @@ func (s *OverviewStore) GetOverview(
 				CancellationReason:   item.CancellationReason,
 				CancellationFeedback: item.CancellationFeedback,
 				CancellationComment:  item.CancellationComment,
+				IsDeleted:            item.DeletedAt != nil && !item.DeletedAt.IsZero(),
 			})
 		}
 	}
@@ -580,6 +586,7 @@ func (s *OverviewStore) GetOverview(
 				CancellationReason:   item.CancellationReason,
 				CancellationFeedback: item.CancellationFeedback,
 				CancellationComment:  item.CancellationComment,
+				IsDeleted:            item.DeletedAt != nil && !item.DeletedAt.IsZero(),
 			})
 		}
 	}
@@ -622,6 +629,7 @@ func (s *OverviewStore) GetOverview(
 			Status:      item.Status,
 			CreatedAt:   isoOrNil(item.CreatedAt),
 			PaidAt:      isoOrNil(item.PaidAt),
+			IsDeleted:   item.DeletedAt != nil && !item.DeletedAt.IsZero(),
 		})
 	}
 
@@ -780,7 +788,7 @@ func buildOneTimeFilter(filter OverviewTableFilter) bson.M {
 	out := bson.M{
 		"type": "one_time",
 	}
-	appendNotDeletedFilter(out)
+	appendDeletedModeFilter(out, filter.Deleted)
 	appendStatusFilter(out, filter.Status)
 	appendClientFilter(
 		out,
@@ -798,7 +806,7 @@ func buildRecurringBillingFilter(filter OverviewTableFilter) bson.M {
 	out := bson.M{
 		"type": "recurring",
 	}
-	appendNotDeletedFilter(out)
+	appendDeletedModeFilter(out, filter.Deleted)
 	appendStatusFilter(out, filter.Status)
 	appendClientFilter(
 		out,
@@ -816,7 +824,7 @@ func buildLegacySubscriptionFilter(subscriptionIDs []string, filter OverviewTabl
 	out := bson.M{
 		"subscriptionId": bson.M{"$exists": true, "$ne": ""},
 	}
-	appendNotDeletedFilter(out)
+	appendDeletedModeFilter(out, filter.Deleted)
 	if len(subscriptionIDs) > 0 {
 		out["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
 	}
@@ -924,6 +932,17 @@ func appendNotDeletedFilter(filter bson.M) {
 	appendAndCondition(filter, bson.M{
 		"deletedAt": bson.M{"$exists": false},
 	})
+}
+
+func appendDeletedModeFilter(filter bson.M, mode string) {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "only":
+		appendAndCondition(filter, bson.M{
+			"deletedAt": bson.M{"$exists": true},
+		})
+	default:
+		appendNotDeletedFilter(filter)
+	}
 }
 
 func cloneBsonMap(input bson.M) bson.M {

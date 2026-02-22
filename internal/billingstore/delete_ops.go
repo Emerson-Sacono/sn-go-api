@@ -27,6 +27,11 @@ type SoftDeleteResult struct {
 	Deleted bool
 }
 
+type RestoreResult struct {
+	Found    bool
+	Restored bool
+}
+
 func normalizeDeleteSource(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "", BillingSourceRecord:
@@ -98,4 +103,68 @@ func (s *OverviewStore) SoftDeleteByID(idHex, source string) (SoftDeleteResult, 
 	}
 
 	return SoftDeleteResult{Found: true, Deleted: false}, nil
+}
+
+func (s *OverviewStore) RestoreByID(idHex, source string) (RestoreResult, error) {
+	trimmedID := strings.TrimSpace(idHex)
+	if trimmedID == "" {
+		return RestoreResult{}, ErrDeleteIDRequired
+	}
+
+	objectID, err := primitive.ObjectIDFromHex(trimmedID)
+	if err != nil {
+		return RestoreResult{}, ErrDeleteIDInvalid
+	}
+
+	normalizedSource := normalizeDeleteSource(source)
+	if normalizedSource == "" {
+		return RestoreResult{}, ErrDeleteSourceInvalid
+	}
+
+	var collection *mongo.Collection
+	switch normalizedSource {
+	case BillingSourceRecord:
+		collection = s.billingRecords
+	case BillingSourceLegacySubscription:
+		collection = s.subscriptions
+	default:
+		return RestoreResult{}, ErrDeleteSourceInvalid
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
+	defer cancel()
+
+	now := time.Now().UTC()
+	updateResult, err := collection.UpdateOne(
+		ctx,
+		bson.M{
+			"_id":       objectID,
+			"deletedAt": bson.M{"$exists": true},
+		},
+		bson.M{
+			"$unset": bson.M{
+				"deletedAt": "",
+			},
+			"$set": bson.M{
+				"updatedAt": now,
+			},
+		},
+	)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	if updateResult != nil && updateResult.MatchedCount > 0 {
+		return RestoreResult{Found: true, Restored: true}, nil
+	}
+
+	var existingDoc bson.M
+	findErr := collection.FindOne(ctx, bson.M{"_id": objectID}).Decode(&existingDoc)
+	if errors.Is(findErr, mongo.ErrNoDocuments) {
+		return RestoreResult{Found: false, Restored: false}, nil
+	}
+	if findErr != nil {
+		return RestoreResult{}, findErr
+	}
+
+	return RestoreResult{Found: true, Restored: false}, nil
 }

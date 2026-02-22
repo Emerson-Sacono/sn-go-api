@@ -29,16 +29,18 @@ func BillingOverview(cfg config.Config, store *billingstore.OverviewStore, authS
 		recurringPageSize := parsePositiveInt64(r.URL.Query().Get("recurringPageSize"), 10, 1, 100)
 		filters := billingstore.OverviewFilters{
 			OneTime: billingstore.OverviewTableFilter{
-				Status: parseFilterString(r.URL.Query().Get("oneTimeStatus"), 40),
-				Client: parseFilterString(r.URL.Query().Get("oneTimeClient"), 120),
-				From:   parseFilterDateStart(r.URL.Query().Get("oneTimeFrom")),
-				To:     parseFilterDateEndExclusive(r.URL.Query().Get("oneTimeTo")),
+				Status:  parseFilterString(r.URL.Query().Get("oneTimeStatus"), 40),
+				Client:  parseFilterString(r.URL.Query().Get("oneTimeClient"), 120),
+				From:    parseFilterDateStart(r.URL.Query().Get("oneTimeFrom")),
+				To:      parseFilterDateEndExclusive(r.URL.Query().Get("oneTimeTo")),
+				Deleted: parseDeletedFilterMode(r.URL.Query().Get("oneTimeDeleted")),
 			},
 			Recurring: billingstore.OverviewTableFilter{
-				Status: parseFilterString(r.URL.Query().Get("recurringStatus"), 40),
-				Client: parseFilterString(r.URL.Query().Get("recurringClient"), 120),
-				From:   parseFilterDateStart(r.URL.Query().Get("recurringFrom")),
-				To:     parseFilterDateEndExclusive(r.URL.Query().Get("recurringTo")),
+				Status:  parseFilterString(r.URL.Query().Get("recurringStatus"), 40),
+				Client:  parseFilterString(r.URL.Query().Get("recurringClient"), 120),
+				From:    parseFilterDateStart(r.URL.Query().Get("recurringFrom")),
+				To:      parseFilterDateEndExclusive(r.URL.Query().Get("recurringTo")),
+				Deleted: parseDeletedFilterMode(r.URL.Query().Get("recurringDeleted")),
 			},
 		}
 
@@ -124,4 +126,13 @@ func parseFilterDateEndExclusive(raw string) *time.Time {
 		return &value
 	}
 	return nil
+}
+
+func parseDeletedFilterMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "only":
+		return "only"
+	default:
+		return ""
+	}
 }
