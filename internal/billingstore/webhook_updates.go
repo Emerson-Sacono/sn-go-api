@@ -313,27 +313,6 @@ func (s *OverviewStore) UpsertBillingFromCheckoutSession(raw json.RawMessage) er
 		"currency":    currency,
 		"createdAt":   now,
 	}
-	if stage != "" {
-		setOnInsert["stage"] = stage
-	}
-	if customerEmail != "" {
-		setOnInsert["customerEmail"] = strings.ToLower(customerEmail)
-	}
-	if customerName != "" {
-		setOnInsert["customerName"] = customerName
-	}
-	if productName != "" {
-		setOnInsert["productName"] = productName
-	}
-	if productDescription != "" {
-		setOnInsert["productDescription"] = productDescription
-	}
-	if productImageURL != "" {
-		setOnInsert["productImageUrl"] = productImageURL
-	}
-	if trialDays > 0 {
-		setOnInsert["trialDays"] = trialDays
-	}
 
 	_, err = s.billingRecords.UpdateOne(
 		ctx,
@@ -494,25 +473,7 @@ func (s *OverviewStore) UpdateBillingFromSubscription(raw json.RawMessage) error
 		}
 	}
 
-	setOnInsert := bson.M{
-		"type":        "recurring",
-		"description": description,
-		"amountMinor": amountMinor,
-		"currency":    currency,
-		"createdAt":   now,
-	}
-	if trialDays > 0 {
-		setOnInsert["trialDays"] = trialDays
-	}
-	if cancellationReason != "" {
-		setOnInsert["cancellationReason"] = cancellationReason
-	}
-	if cancellationFeedback != "" {
-		setOnInsert["cancellationFeedback"] = cancellationFeedback
-	}
-	if cancellationComment != "" {
-		setOnInsert["cancellationComment"] = cancellationComment
-	}
+	setOnInsert := bson.M{"createdAt": now}
 
 	updateDoc := bson.M{
 		"$set":         sharedSet,
