@@ -656,7 +656,14 @@ func buildOneTimeFilter(filter OverviewTableFilter) bson.M {
 		"type": "one_time",
 	}
 	appendStatusFilter(out, filter.Status)
-	appendClientFilter(out, filter.Client, "customerName", "customerEmail")
+	appendClientFilter(
+		out,
+		filter.Client,
+		"customerName",
+		"customerEmail",
+		"metadata.customerName",
+		"metadata.customerEmail",
+	)
 	appendDateRangeFilter(out, "createdAt", filter.From, filter.To)
 	return out
 }
@@ -666,7 +673,14 @@ func buildRecurringBillingFilter(filter OverviewTableFilter) bson.M {
 		"type": "recurring",
 	}
 	appendStatusFilter(out, filter.Status)
-	appendClientFilter(out, filter.Client, "customerName", "customerEmail")
+	appendClientFilter(
+		out,
+		filter.Client,
+		"customerName",
+		"customerEmail",
+		"metadata.customerName",
+		"metadata.customerEmail",
+	)
 	appendDateRangeFilter(out, "updatedAt", filter.From, filter.To)
 	return out
 }
@@ -679,7 +693,14 @@ func buildLegacySubscriptionFilter(subscriptionIDs []string, filter OverviewTabl
 		out["subscriptionId"] = bson.M{"$exists": true, "$ne": "", "$nin": subscriptionIDs}
 	}
 	appendStatusFilter(out, filter.Status)
-	appendClientFilter(out, filter.Client, "name", "email")
+	appendClientFilter(
+		out,
+		filter.Client,
+		"name",
+		"email",
+		"metadata.customerName",
+		"metadata.customerEmail",
+	)
 	appendLegacyDateRangeFilter(out, filter.From, filter.To)
 	return out
 }
